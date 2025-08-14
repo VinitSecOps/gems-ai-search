@@ -1,0 +1,48 @@
+{
+  "name": "gems-ai-search-root",
+  "version": "1.0.0",
+  "private": true,
+  "description": "GEMS AI Search - Root package for managing both frontend and backend",
+  "scripts": {
+    "install:backend": "cd backend && npm install",
+    "install:frontend": "cd frontend && npm install",
+    "install:all": "npm run install:backend && npm run install:frontend",
+    "dev:backend": "cd backend && npm run dev",
+    "dev:frontend": "cd frontend && npm start",
+    "build:frontend": "cd frontend && npm run build",
+    "start:backend": "cd backend && npm start",
+    "test:backend": "cd backend && npm test",
+    "test:frontend": "cd frontend && npm test",
+    "test:all": "npm run test:backend && npm run test:frontend",
+    "clean": "rm -rf backend/node_modules frontend/node_modules backend/logs/* frontend/build",
+    "setup": "npm run install:all && echo '\\n✅ Setup complete! Check .env.example for configuration.\\n'",
+    "health-check": "curl -f http://localhost:3001/api/health || echo 'Backend not running'"
+  },
+  "keywords": [
+    "ai",
+    "search",
+    "natural-language",
+    "sql",
+    "react",
+    "nodejs",
+    "openai",
+    "gpt"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yourusername/gems-ai-search.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/gems-ai-search/issues"
+  },
+  "homepage": "https://github.com/yourusername/gems-ai-search#readme",
+  "license": "MIT",
+  "author": "Your Name <your.email@example.com>",
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=8.0.0"
+  }
+}

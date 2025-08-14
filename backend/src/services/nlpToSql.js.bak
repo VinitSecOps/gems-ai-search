@@ -1,0 +1,298 @@
+import OpenAI from 'openai';
+import winston from 'winston';
+import { executeQuery } from '../config/database.js';
+import { enhanceNlpContextWithStatuses } from './statusMappingService.js';
+
+const logger = winston.createLogger({
+  level: 'info',
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.json()
+  ),
+  transports: [
+    new winston.transports.Console(),
+    new winston.transports.File({ filename: 'logs/nlp.log' })
+  ]
+});
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
+
+// Function to expand abbreviations and apply synonyms to a query
+const expandQueryWithSynonyms = async (query) => {
+  try {
+    // Get all active synonyms from database
+    const synonyms = await executeQuery(`
+      SELECT Term, Synonym, IsAbbreviation 
+      FROM dbo.SearchSynonyms 
+      WHERE IsActive = 1
+    `, []);
+    
+    let expandedQuery = query;
+    
+    // Process abbreviations and synonyms
+    for (const syn of synonyms) {
+      // For abbreviations (e.g., CC → CostCentre)
+      if (syn.IsAbbreviation) {
+        // Use word boundary for more precise matching
+        const regex = new RegExp(`\\b${syn.Synonym}\\b`, 'gi');
+        expandedQuery = expandedQuery.replace(regex, syn.Term);
+      }
+    }
+    
+    logger.info('Expanded query:', { original: query, expanded: expandedQuery });
+    return expandedQuery;
+  } catch (error) {
+    logger.error('Error expanding query with synonyms:', error);
+    return query; // Return original if expansion fails
+  }
+};
+
+const SYSTEM_PROMPT = `You are a SQL assistant for the GEMS system on SQL Server.
+CRITICAL RULES:
+1. ALWAYS return ONLY a single SELECT statement
+2. NEVER use parameters (@p0, @p1) - use literal values or wildcards
+3. For name searches, use LIKE with wildcards: WHERE FirstName LIKE '%John%' 
+   or better yet, use CONTAINS function for full-text search: WHERE CONTAINS(FirstName, '"John*"')
+4. Always use fully qualified names: dbo.TableName
+5. Use TOP 100 to limit results
+6. When enum values are mentioned (like status), translate them to their numeric values
+
+Schema Mapping:
+- agency/agencies/companies → Company table
+- client/clients/customer/customers → Clients table  
+- site/sites/location/locations → Sites table
+- booking/bookings/job/jobs → Bookings or SimpleBookings table
+- requirement/requirements → Requirements table
+- candidate/candidates/worker/workers → Candidates table
+- timesheet/timesheets/ts → Timesheets table
+- cost centre/costcentre/cc → CostCentres table
+
+Key Tables and Columns:
+Company(Id, CompanyName, IsActive, IsSuspended)
+Clients(Id, ClientNumber, Name, CompanyId, ClientStatusId, CreatedDate)
+Sites(Id, Name, ClientId, SiteNumber, CreatedDate)
+Bookings(Id, BookingNumber, BookingStatusId, CompanyId, ClientId, SiteId, StartDate, EndDate)
+SimpleBookings(Id, CompanyId, ClientId, SiteId, StartDate)
+Requirements(Id, Name, BookingId, NumberRequested)
+Candidates(Id, PayrollNumber, FirstName, Surname, CompanyId, CreatedDate)
+Timesheets(Id, TimesheetRef, CompanyId, ClientId, SiteId, StatusId, TimesheetEndDate, TotalPay, TotalCharge)
+TimesheetCandidates(Id, CandidateId, TimesheetId, TimesheetStatusId)
+CostCentres(Id, Name, Number, CompanyId)
+SearchSynonyms(Id, Term, Synonym, IsAbbreviation)
+SearchHistory(Id, UserId, Query, GeneratedSQL, ResultCount, ExecutionTimeMs)
+EnumMappings(Id, TableName, ColumnName, Value, DisplayText)
+
+Status Values:
+- Timesheet StatusId: 1=Incomplete, 2=PartiallyComplete, 3=Complete, 4=Approved, 5=Submitted, 6=Rejected, 7=WaitingForAdjustApproval, 8=AwaitingPACSProcessing
+- ClientStatusId: 1=Inactive, 2=Active, 3=Archived, 4=OnHold
+- Booking WorkStatusId: 1=Inactive, 2=Active, 3=Archived, 4=OnHold
+- Requirements CVWorkflowStatusId: 1=CVShortlisted, 3=ClientReviewing, 4=InterviewRequested, 5=InterviewArranged, 6=CandidateConsidering, 7=OfferMade, 8=OfferAccepted, 9=Rejected, 10=Filled
+- Users RoleId: 1=AgencyUser, 2=AgencyAdmin, 3=SimplicityAdmin, 4=BlueberryAdmin, 5=ClientBasicUser, 6=ClientTimesheetUser, 7=ClientSuperUser
+
+For better performance:
+1. For text searches, use CONTAINS() with full-text search when available
+2. Use JOIN rather than subqueries where possible
+3. When searching for names, search both first and last names
+4. Consider using vw_SearchCommonEntities view for common entity searches
+
+Query Examples:
+"Find candidates named John" → SELECT TOP 100 Id, FirstName, Surname FROM dbo.Candidates WHERE CONTAINS((FirstName, Surname), '"John*"')
+"Active clients" → SELECT TOP 100 Id, Name FROM dbo.Clients WHERE ClientStatusId = 1
+"Timesheets awaiting approval" → SELECT TOP 100 * FROM dbo.Timesheets WHERE StatusId IN (1, 2)
+"Show bookings this year" → SELECT TOP 100 * FROM dbo.Bookings WHERE YEAR(StartDate) = YEAR(GETDATE())
+"Find cost centres for company Matriks" → SELECT TOP 100 cc.* FROM dbo.CostCentres cc JOIN dbo.Company c ON cc.CompanyId = c.Id WHERE c.CompanyName LIKE '%Matriks%'
+"Show all active companies" → SELECT TOP 100 * FROM dbo.Company WHERE IsActive = 1
+
+Always start with SELECT and use literal values, never parameters. Prefer CONTAINS over LIKE when searching text fields where full-text indexing is available.`;
+
+export const convertNaturalLanguageToSQL = async (userQuery) => {
+  try {
+    logger.info('Processing NLP query:', userQuery);
+    
+    // First expand the query with synonym handling
+    const expandedQuery = await expandQueryWithSynonyms(userQuery);
+    
+    // Prepare conversation history for context
+    let messages = [
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content: expandedQuery }
+    ];
+    
+    // Enhance context with status term recognition
+    try {
+      const statusContext = await enhanceNlpContextWithStatuses(expandedQuery);
+      if (statusContext) {
+        messages.push({ role: "system", content: statusContext });
+      }
+    } catch (statusError) {
+      logger.warn('Error enhancing query with status recognition:', statusError);
+      // Continue without status enhancement if it fails
+    };
+    
+    // Look up recent similar queries from search history to provide as examples
+    try {
+      const recentQueries = await executeQuery(`
+        SELECT TOP 3 Query, GeneratedSQL
+        FROM dbo.SearchHistory 
+        WHERE Success = 1 
+          AND (Query LIKE '%${userQuery.replace(/'/g, "''")}%' 
+            OR Query LIKE '%${expandedQuery.replace(/'/g, "''")}%')
+        ORDER BY SearchDate DESC
+      `, []);
+      
+      if (recentQueries && recentQueries.length > 0) {
+        // Add examples from search history to help with context
+        let examplesContext = "Here are some similar recent successful queries as examples:\n\n";
+        
+        for (const recent of recentQueries) {
+          examplesContext += `User query: "${recent.Query}"\n`;
+          examplesContext += `SQL: ${recent.GeneratedSQL}\n\n`;
+        }
+        
+        messages.push({ role: "system", content: examplesContext });
+        messages.push({ role: "user", content: `Now handle this query: ${expandedQuery}` });
+      }
+    } catch (historyError) {
+      logger.warn('Could not retrieve search history:', historyError);
+      // Continue without history if it fails
+    }
+    
+    // Call OpenAI API with the prepared messages
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4",
+      messages: messages,
+      temperature: 0.1,
+      max_tokens: 500
+    });
+    
+    let sql = completion.choices?.[0]?.message?.content?.trim() || "";
+    
+    // Clean up the SQL - remove code block markers if present
+    sql = sql.replace(/```sql\n?/g, '').replace(/```\n?/g, '').trim();
+    
+    // Log the generated SQL for debugging
+    logger.info('Generated SQL:', { originalQuery: userQuery, expandedQuery, sql });
+    
+    if (!sql) {
+      throw new Error("Empty SQL generated");
+    }
+    
+    // Validate it's a SELECT statement
+    if (!sql.toLowerCase().startsWith("select")) {
+      logger.error('Non-SELECT statement generated:', { sql, query: expandedQuery });
+      throw new Error("Only SELECT statements are allowed");
+    }
+    
+    // Ensure it has a TOP clause for safety
+    if (!sql.toLowerCase().includes(' top ')) {
+      sql = sql.replace(/^SELECT\s+/i, 'SELECT TOP 100 ');
+      logger.info('Added TOP clause for safety:', { modifiedSQL: sql });
+    }
+    
+    return sql;
+  } catch (error) {
+    logger.error('NLP to SQL conversion failed:', { 
+      query: userQuery,
+      error: error.message,
+      stack: error.stack
+    });
+    
+    if (error.message.includes('Only SELECT statements')) {
+      throw error;
+    }
+    
+    throw new Error(`Failed to convert query: ${error.message}`);
+  }
+};
+
+// Function to get search suggestions
+export const getSearchSuggestions = async (query, userId = null, maxResults = 5) => {
+  try {
+    const result = await executeQuery(`
+      EXEC dbo.sp_GetSearchSuggestions @Query = @p1, @UserId = @p2, @MaxResults = @p3
+    `, [query, userId, maxResults]);
+    
+    return result;
+  } catch (error) {
+    logger.error('Failed to get search suggestions:', { query, error });
+    return [];
+  }
+};
+
+// Function to record search history
+export const recordSearchHistory = async (userId, query, generatedSQL, resultCount, executionTimeMs, ip = null, userAgent = null, success = true) => {
+  try {
+    const result = await executeQuery(`
+      EXEC dbo.sp_RecordSearchHistory 
+        @UserId = @p1, 
+        @Query = @p2, 
+        @GeneratedSQL = @p3, 
+        @ResultCount = @p4, 
+        @ExecutionTimeMs = @p5, 
+        @IP = @p6, 
+        @UserAgent = @p7, 
+        @Success = @p8
+    `, [userId, query, generatedSQL, resultCount, executionTimeMs, ip, userAgent, success]);
+    
+    return result;
+  } catch (error) {
+    logger.error('Failed to record search history:', { query, error });
+    // Continue even if recording history fails
+    return null;
+  }
+};
+
+// Main function to convert natural language to SQL
+export const convertNaturalLanguageToSQL = async (userQuery) => {
+  // The main implementation is already above
+  try {
+    return await generateSqlFromNaturalLanguage(userQuery);
+  } catch (error) {
+    throw error;
+  }
+};
+
+// Function to get search suggestions
+export const getSearchSuggestions = async (query, userId = null, maxResults = 5) => {
+  try {
+    const result = await executeQuery(`
+      EXEC dbo.sp_GetSearchSuggestions @Query = @p1, @UserId = @p2, @MaxResults = @p3
+    `, [query, userId, maxResults]);
+    
+    return result;
+  } catch (error) {
+    logger.error('Failed to get search suggestions:', { query, error });
+    return [];
+  }
+};
+
+// Function to record search history
+export const recordSearchHistory = async (userId, query, generatedSQL, resultCount, executionTimeMs, ip = null, userAgent = null, success = true) => {
+  try {
+    const result = await executeQuery(`
+      EXEC dbo.sp_RecordSearchHistory 
+        @UserId = @p1, 
+        @Query = @p2, 
+        @GeneratedSQL = @p3, 
+        @ResultCount = @p4, 
+        @ExecutionTimeMs = @p5, 
+        @IP = @p6, 
+        @UserAgent = @p7, 
+        @Success = @p8
+    `, [userId, query, generatedSQL, resultCount, executionTimeMs, ip, userAgent, success]);
+    
+    return result;
+  } catch (error) {
+    logger.error('Failed to record search history:', { query, error });
+    // Continue even if recording history fails
+    return null;
+  }
+};
+
+export const extractParameters = (sql) => {
+  const paramRegex = /@p\d+/g;
+  const matches = sql.match(paramRegex);
+  return matches ? matches.length : 0;
+};
