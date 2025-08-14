@@ -256,7 +256,13 @@ Try these natural language queries:
    - Check your OpenAI account has credits
    - Ensure rate limits aren't exceeded
 
-4. **Port Already in Use**
+4. **Missing Export in enumMappingService.js**
+   - If you see an error like `SyntaxError: The requested module '../services/enumMappingService.js' does not provide an export named 'enhanceResultsWithEnumDisplayText'`, you need to add the missing function to the file. The function should be implemented to map numeric enum values to their human-readable text equivalents.
+
+5. **Missing logs Directory**
+   - Create a `logs` directory inside the backend folder if it doesn't exist
+
+6. **Port Already in Use**
    ```bash
    # Kill processes on ports 3000/3001
    npx kill-port 3000

@@ -159,3 +159,66 @@ export const getEnumValueFromText = async (tableName, columnName, text) => {
     return null;
   }
 };
+
+/**
+ * Enhances database results with human-readable enum values
+ * @param {Array} results - The database results to enhance
+ * @returns {Promise<Array>} The enhanced results
+ */
+export const enhanceResultsWithEnumDisplayText = async (results) => {
+  if (!results || results.length === 0) {
+    return results;
+  }
+
+  try {
+    // Refresh cache if needed
+    const now = Date.now();
+    if (!enumMappingsCache || (now - lastCacheRefresh) > CACHE_TTL) {
+      enumMappingsCache = await loadEnumMappings();
+      lastCacheRefresh = now;
+    }
+
+    // Create a deep copy of results to avoid modifying the original
+    const enhancedResults = JSON.parse(JSON.stringify(results));
+    
+    // Extract table name from first column (if available)
+    // This is a heuristic - assumes first column name contains table info
+    // Example: "TimesheetId" → "Timesheet"
+    const firstKey = Object.keys(enhancedResults[0])[0];
+    let tableName = '';
+    if (firstKey) {
+      // Extract table name from column name (e.g., "TimesheetId" → "Timesheet")
+      const match = firstKey.match(/^([A-Z][a-z]+)/);
+      if (match) {
+        tableName = match[1] + 's'; // Convert singular to plural
+      }
+    }
+
+    // Iterate through each result row
+    for (const row of enhancedResults) {
+      // Look for potential enum columns (typically ending with 'Id' or 'StatusId')
+      for (const [columnName, value] of Object.entries(row)) {
+        // Skip non-numeric values or nulls
+        if (typeof value !== 'number' || value === null) continue;
+        
+        // Check if column looks like an enum (ends with Id)
+        if (columnName.endsWith('Id') || columnName.endsWith('StatusId') || columnName.endsWith('TypeId')) {
+          // Get the display text for this potential enum value
+          const displayText = await getEnumDisplayText(tableName, columnName, value);
+          
+          // If we found a display text, add it as a new property
+          if (displayText) {
+            // Create a readable name (e.g., "StatusId" → "Status")
+            const readableName = columnName.replace(/Id$/, '');
+            row[readableName] = displayText;
+          }
+        }
+      }
+    }
+    
+    return enhancedResults;
+  } catch (error) {
+    logger.error('Error enhancing results with enum display text:', error);
+    return results; // Return original results if enhancement fails
+  }
+};
