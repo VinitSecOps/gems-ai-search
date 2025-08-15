@@ -360,9 +360,23 @@ Natural language search interface for the GEMS database system. Ask questions in
 - OpenAI API Key
 - Access to GEMS SQL Server database
 
-### Installation
+### Installation 
 
 1. **Clone the repository**
 ```bash
 git clone <your-repo-url>
 cd gems-ai-search
+```
+
+## Screenshots
+
+### Day Mode
+![Day Mode](https://raw.githubusercontent.com/VinitSecOps/gems-ai-search/main/Assests/GEMS-AI-SEARCH%20Day%20Mode.png)
+
+### Night Mode
+![Night Mode](https://raw.githubusercontent.com/VinitSecOps/gems-ai-search/main/Assests/GEMS-AI-SEARCH%20Night%20Mode.png)
+
+## Demo Video
+[![Watch the video](https://raw.githubusercontent.com/VinitSecOps/gems-ai-search/main/Assests/GEMS-AI-SEARCH%20Day%20Mode.png)](https://raw.githubusercontent.com/VinitSecOps/gems-ai-search/main/Assests/GEMS-AI-SEARCH%20Video.mp4)
+
+
